@@ -109,7 +109,7 @@ module ActiveSupport
         return {} if names == []
         options = names.extract_options!
         keys = names.map{|name| normalize_key(name, options)}
-        values = with { |c| c.mget(*keys) }
+        values = (with { |c| c.mget(*keys) }) || []
         values.map! { |v| v.is_a?(ActiveSupport::Cache::Entry) ? v.value : v }
 
         result = Hash[names.zip(values)]
