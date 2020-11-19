@@ -2,3 +2,5 @@ Gemfile.lock
 *.gem
 tmp/
 gemfiles/*.lock
+stdout
+gemfiles/vendor

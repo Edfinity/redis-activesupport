@@ -26,6 +26,13 @@ describe ActiveSupport::Cache::RedisStore do
     end
   end
 
+  it "uses redis client passed as an option" do
+    redis = Redis.new(url: "redis://127.0.0.1:6380/1")
+    store = ActiveSupport::Cache::RedisStore.new(client: redis)
+
+    store.data.must_equal(redis)
+  end
+
   it "connects using an hash of options" do
     address = { host: '127.0.0.1', port: '6380', db: '1' }
     store = ActiveSupport::Cache::RedisStore.new(address.merge(pool_size: 5, pool_timeout: 10))
@@ -88,6 +95,11 @@ describe ActiveSupport::Cache::RedisStore do
 
   it "creates a normal store when given no addresses" do
     underlying_store = instantiate_store
+    underlying_store.must_be_instance_of(::Redis::Store)
+  end
+
+  it "creates a normal store when given nil" do
+    underlying_store = instantiate_store nil
     underlying_store.must_be_instance_of(::Redis::Store)
   end
 
@@ -176,7 +188,7 @@ describe ActiveSupport::Cache::RedisStore do
     end
   end
 
-  if RUBY_VERSION.match /1\.9/
+  if RUBY_VERSION.match(/1\.9/)
     it "reads raw data" do
       with_store_management do |store|
         result = store.read("rabbit", :raw => true)
@@ -221,6 +233,18 @@ describe ActiveSupport::Cache::RedisStore do
       store.write "rabbit2", @white_rabbit
       store.write "rub-a-dub", "Flora de Cana"
       store.delete_matched "rabb*"
+      store.read("rabbit").must_be_nil
+      store.read("rabbit2").must_be_nil
+      store.exist?("rub-a-dub").must_equal(true)
+    end
+  end
+
+  it 'deletes matched data with a regexp' do
+    with_store_management do |store|
+      store.write "rabbit2", @white_rabbit
+      store.write "rub-a-dub", "Flora de Cana"
+      store.delete_matched(/rabb*/)
+
       store.read("rabbit").must_be_nil
       store.read("rabbit2").must_be_nil
       store.exist?("rub-a-dub").must_equal(true)
@@ -279,7 +303,7 @@ describe ActiveSupport::Cache::RedisStore do
       store.read("raw-counter", :raw => true).to_i.must_equal(3)
     end
   end
-  
+
   it "decrements a raw key" do
     with_store_management do |store|
       assert store.write("raw-counter", 3, :raw => true)
@@ -308,6 +332,24 @@ describe ActiveSupport::Cache::RedisStore do
       3.times { store.increment "counter" }
       store.decrement "counter", 2, nil
       store.read("counter", :raw => true).to_i.must_equal(1)
+    end
+  end
+
+  it "increments a key with expiration time" do
+    with_store_management do |store|
+      store.increment "counter", 1, :expires_in => 1.second
+      store.read("counter", :raw => true).to_i.must_equal(1)
+      sleep 2
+      store.read("counter", :raw => true).must_be_nil
+    end
+  end
+
+  it "decrements a key with expiration time" do
+    with_store_management do |store|
+      store.decrement "counter", 1, :expires_in => 1.second
+      store.read("counter", :raw => true).to_i.must_equal(-1)
+      sleep 2
+      store.read("counter", :raw => true).must_be_nil
     end
   end
 
@@ -351,6 +393,43 @@ describe ActiveSupport::Cache::RedisStore do
     end
   end
 
+  describe "race_condition_ttl on fetch" do
+    it "persist entry for longer than given ttl" do
+      options = { force: true, expires_in: 1.second, race_condition_ttl: 2.seconds, version: Time.now.to_i }
+      @store.fetch("rabbit", options) { @rabbit }
+      sleep 1.1
+      @store.delete("rabbit").must_equal(1)
+    end
+
+    it "limits stampede time to read-write duration" do
+      first_rabbit = second_rabbit = nil
+      options = { force: true, expires_in: 1.second, race_condition_ttl: 2.seconds, version: Time.now.to_i }
+      @store.fetch("rabbit", options) { @rabbit }
+      sleep 1
+
+      th1 = Thread.new do
+        first_rabbit = @store.fetch("rabbit", options) do
+          sleep 1
+          @white_rabbit
+        end
+      end
+
+      sleep 0.1
+
+      th2 = Thread.new do
+        second_rabbit = @store.fetch("rabbit") { @white_rabbit }
+      end
+
+      th1.join
+      th2.join
+
+      first_rabbit.must_equal(@white_rabbit)
+      second_rabbit.must_equal(@rabbit)
+
+      @store.fetch("rabbit").must_equal(@white_rabbit)
+    end
+  end
+
   it "reads multiple keys" do
     @store.write "irish whisky", "Jameson"
     result = @store.read_multi "rabbit", "irish whisky"
@@ -376,6 +455,19 @@ describe ActiveSupport::Cache::RedisStore do
   it "read_multi return an empty {} when given an empty array" do
     result = @store.read_multi(*[])
     result.must_equal({})
+  end
+
+  it "read_multi return an empty {} when given an empty array with option" do
+    result = @store.read_multi(*[], option: true)
+    result.must_equal({})
+  end
+
+  it "read_multi returns values with raw option" do
+    @store.write "raw-value-a", "A", raw: true
+    @store.write "raw-value-b", "B", raw: true
+
+    result = @store.read_multi("raw-value-a", "raw-value-b", :raw => true)
+    result.must_equal({ "raw-value-a" => "A", "raw-value-b" => "B" })
   end
 
   describe "fetch_multi" do
@@ -409,6 +501,11 @@ describe ActiveSupport::Cache::RedisStore do
       result = @store.fetch_multi(*[]) { 1 }
       result.must_equal({})
     end
+
+    it "return an empty {} when given an empty array with option" do
+      result = @store.read_multi(*[], option: true)
+      result.must_equal({})
+    end
   end
 
   describe "fetch_multi namespaced keys" do
@@ -436,6 +533,22 @@ describe ActiveSupport::Cache::RedisStore do
       result.must_equal({ "bourbon" => "makers", "rye" => "rye-was-missing" })
       @store.read("namespaced:rye").must_equal("rye-was-missing")
       @store.read("namespaced:inner-rye").must_equal("rye-was-missing")
+    end
+  end
+
+  describe "fetch_multi nested keys" do
+    it "reads existing keys and fills in anything missing" do
+      @store.write ["bourbon", "bourbon-extended"], "makers"
+
+      bourbon_key = ["bourbon", "bourbon-extended"]
+      rye_key = ["rye", "rye-extended"]
+
+      result = @store.fetch_multi(bourbon_key, rye_key) do |key|
+        "#{key}-was-missing"
+      end
+
+      result.must_equal({ bourbon_key => "makers", rye_key => "#{rye_key}-was-missing" })
+      @store.read(rye_key).must_equal("#{rye_key}-was-missing")
     end
   end
 
@@ -502,6 +615,18 @@ describe ActiveSupport::Cache::RedisStore do
       exist.payload.must_equal({ :key => 'the smiths' })
     end
 
+    it "notifies on #read_multi" do
+      @store.write "depeche mode", "Enjoy The Silence"
+
+      with_notifications do
+        @store.read_multi "metallica", "depeche mode"
+      end
+
+      read = @events.first
+      read.name.must_equal('cache_read_multi.active_support')
+      read.payload.must_equal({ :key => ["metallica", "depeche mode"], :hits => ["depeche mode"] })
+    end
+
     it "notifies on #delete_matched" do
       with_notifications do
         @store.delete_matched "afterhours*"
@@ -557,6 +682,20 @@ describe ActiveSupport::Cache::RedisStore do
       end
     end
 
+    it "raises on read_multi when redis is unavailable" do
+      assert_raises(Redis::CannotConnectError) do
+        @raise_error_store.read_multi("rabbit", "white-rabbit")
+      end
+    end
+
+    it "raises on fetch_multi when redis is unavailable" do
+      assert_raises(Redis::CannotConnectError) do
+        @raise_error_store.fetch_multi("rabbit", "white-rabbit") do |key|
+          key.upcase
+        end
+      end
+    end
+
     it "raises on writes when redis is unavailable" do
       assert_raises(Redis::CannotConnectError) do
         @raise_error_store.write "rabbit", @white_rabbit, :expires_in => 1.second
@@ -582,8 +721,21 @@ describe ActiveSupport::Cache::RedisStore do
       @raise_error_store.stubs(:with).raises(Redis::CannotConnectError)
     end
 
-    it "is nil when redis is unavailable" do
+    it "returns nil from read when redis is unavailable" do
       @raise_error_store.read("rabbit").must_be_nil
+    end
+
+    it "returns empty hash from read_multi when redis is unavailable" do
+      @raise_error_store.read_multi("rabbit", "white-rabbit").must_equal({})
+    end
+
+    it "returns result hash from fetch_multi when redis is unavailable" do
+      @raise_error_store.fetch_multi("rabbit", "white-rabbit") do |key|
+        key.upcase
+      end.must_equal({
+        "rabbit" => "RABBIT",
+        "white-rabbit" => "WHITE-RABBIT",
+      })
     end
 
     it "returns false when redis is unavailable" do
@@ -628,4 +780,3 @@ describe ActiveSupport::Cache::RedisStore do
        ActiveSupport::VERSION::MAJOR == 4 && ActiveSupport::VERSION::MINOR < 2
     end
 end
-
