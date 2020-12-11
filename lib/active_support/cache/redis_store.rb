@@ -144,7 +144,7 @@ module ActiveSupport
         results = read_multi(*names, options)
         need_writes = {}
 
-        fetched = names.inject({}) do |memo, name|
+        fetched = names.inject({}) do |memo, (name, _)|
           memo[name] = results.fetch(name) do
             value = yield name
             need_writes[name] = value
